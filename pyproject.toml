@@ -7,7 +7,9 @@ authors = [
     { name = "driedwater", email = "88548136+driedwater@users.noreply.github.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "playwright>=1.62.0",
+]
 
 [project.scripts]
 zoom-transcriptions = "zoom_transcriptions:main"
@@ -15,3 +17,8 @@ zoom-transcriptions = "zoom_transcriptions:main"
 [build-system]
 requires = ["uv_build>=0.12.8,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.5",
+]
