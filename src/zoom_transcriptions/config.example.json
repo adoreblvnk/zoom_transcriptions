@@ -1,0 +1,11 @@
+{
+    "output_dir": "transcriptions",
+    "modules": {
+        "INF2004": {
+            "url": "https://xsite.singaporetech.edu.sg/d2l/common/dialogs/quickLink/quickLink.d2l?ou=YOUR_OU&type=lti&rcode=YOUR_RCODE&srcou=YOUR_SRCOU&launchFramed=1&framedName=Zoom+Meeting"
+        },
+        "CS101": {
+            "url": "https://xsite.singaporetech.edu.sg/d2l/common/dialogs/quickLink/quickLink.d2l?ou=YOUR_OU&type=lti&rcode=YOUR_RCODE&srcou=YOUR_SRCOU&launchFramed=1&framedName=Zoom+Meeting"
+        }
+    }
+}
