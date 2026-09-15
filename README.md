@@ -53,34 +53,11 @@ To find the URL for your module:
 
 ## Usage
 
-Run for all configured modules:
-
 ```bash
-uv run python -m zoom_transcriptions.automate
-```
-
-Run for a specific module:
-
-```bash
-uv run python -m zoom_transcriptions.automate --module INF2004
-```
-
-Run in headed mode (visible browser):
-
-```bash
-uv run python -m zoom_transcriptions.automate --headed
-```
-
-Skip re-downloading existing transcripts (default behaviour):
-
-```bash
-uv run python -m zoom_transcriptions.automate --skip-existing
-```
-
-Re-download all transcripts:
-
-```bash
-uv run python -m zoom_transcriptions.automate --no-skip-existing
+uv run zoom-transcriptions                      # all modules
+uv run zoom-transcriptions --module INF2004     # specific module
+uv run zoom-transcriptions --latest             # latest transcript only
+uv run zoom-transcriptions --no-skip-existing   # re-download all
 ```
 
 ## How it works
