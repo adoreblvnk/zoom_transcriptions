@@ -11,3 +11,7 @@ wheels/
 
 # env file
 .env
+
+.ruff_cache
+transcriptions
+config.json
