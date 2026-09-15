@@ -7,9 +7,12 @@ import os
 import re
 import sys
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
+
+from .zoom import fetch_zoom_recording
 
 ZOOM_API_HOST = "applications.zoom.us"
 
@@ -52,20 +55,34 @@ def find_zoom_frame(page):
     return None
 
 
+async def switch_to_cloud_tab(zoom_frame):
+    """Click the Cloud Recordings tab in the Zoom frame."""
+    try:
+        all_tabs = zoom_frame.locator(".ant-tabs-tab")
+        tab_count = await all_tabs.count()
+        for t in range(tab_count):
+            text = await all_tabs.nth(t).inner_text()
+            if "cloud" in text.lower():
+                await all_tabs.nth(t).click()
+                await asyncio.sleep(3)
+                break
+    except (AttributeError, TypeError):
+        pass
+
+
 async def load_recordings(page, url: str):
     """Navigate to Zoom LTI URL, click Cloud Recordings, return list of recordings."""
-    lti_scid = None
+    found_lti_scid = False
     recordings = []
 
     async def on_response(response):
-        nonlocal lti_scid, recordings
+        nonlocal found_lti_scid, recordings
         if ZOOM_API_HOST not in response.url:
             return
         if "lti_scid" in response.url:
-            parsed = __import__("urllib.parse", fromlist=["urlparse", "parse_qs"]).urlparse(response.url)
-            params = __import__("urllib.parse", fromlist=["urlparse", "parse_qs"]).parse_qs(parsed.query)
+            params = parse_qs(urlparse(response.url).query)
             if "lti_scid" in params:
-                lti_scid = params["lti_scid"][0]
+                found_lti_scid = True
         if "/COURSE" in response.url:
             try:
                 data = await response.json()
@@ -78,29 +95,20 @@ async def load_recordings(page, url: str):
     await asyncio.sleep(5)
     page.remove_listener("response", on_response)
 
-    if not lti_scid:
-        return [], None
+    if not found_lti_scid:
+        return []
 
     zoom_frame = find_zoom_frame(page)
     if not zoom_frame:
-        return [], None
+        return []
 
-    try:
-        all_tabs = zoom_frame.locator(".ant-tabs-tab")
-        tab_count = await all_tabs.count()
-        for t in range(tab_count):
-            text = await all_tabs.nth(t).inner_text()
-            if "cloud" in text.lower():
-                recordings = []
-                page.on("response", on_response)
-                await all_tabs.nth(t).click()
-                await asyncio.sleep(5)
-                page.remove_listener("response", on_response)
-                break
-    except (AttributeError, TypeError):
-        pass
+    recordings = []
+    page.on("response", on_response)
+    await switch_to_cloud_tab(zoom_frame)
+    await asyncio.sleep(2)
+    page.remove_listener("response", on_response)
 
-    return recordings, lti_scid
+    return recordings
 
 
 async def get_recording_details(page, row_key: int) -> tuple[str, str]:
@@ -180,7 +188,16 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
     return play_url, password
 
 
-async def process_module(page, module_code, module_url, output_dir, skip_existing):
+async def reload_cloud_tab(page, module_url):
+    """Navigate back to module and switch to cloud recordings tab."""
+    await page.goto(module_url, wait_until="networkidle")
+    await asyncio.sleep(3)
+    zoom_frame = find_zoom_frame(page)
+    if zoom_frame:
+        await switch_to_cloud_tab(zoom_frame)
+
+
+async def process_module(page, module_code, module_url, output_dir, skip_existing, latest=False):
     print(f"\n{'='*60}")
     print(f"📚 Module: {module_code}")
     print(f"{'='*60}")
@@ -192,12 +209,16 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
     skipped = 0
     failed = 0
 
-    recordings, _lti_scid = await load_recordings(page, module_url)
+    recordings = await load_recordings(page, module_url)
     if not recordings:
         print("  ❌ No recordings found")
         return 0, 0, 1
 
     print(f"  📋 Found {len(recordings)} recording(s)")
+
+    if latest:
+        recordings = recordings[:1]
+        print("  🔖 --latest: processing only the most recent recording")
 
     for i, recording in enumerate(recordings):
         topic = recording.get("topic", "Unknown Recording")
@@ -222,48 +243,17 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
             if attempt < 2:
                 print(f"    🔄 Retrying (attempt {attempt + 2})...")
                 await asyncio.sleep(2)
-                await page.goto(module_url, wait_until="networkidle")
-                await asyncio.sleep(3)
-
-                zoom_frame = find_zoom_frame(page)
-                if zoom_frame:
-                    try:
-                        all_tabs = zoom_frame.locator(".ant-tabs-tab")
-                        tab_count = await all_tabs.count()
-                        for t in range(tab_count):
-                            text = await all_tabs.nth(t).inner_text()
-                            if "cloud" in text.lower():
-                                await all_tabs.nth(t).click()
-                                await asyncio.sleep(3)
-                                break
-                    except (AttributeError, TypeError):
-                        pass
+                await reload_cloud_tab(page, module_url)
 
         if not play_url or not rec_password:
             print(f"  ⚠️  Could not get details for '{topic}'")
             failed += 1
-            await page.goto(module_url, wait_until="networkidle")
-            await asyncio.sleep(3)
-
-            zoom_frame = find_zoom_frame(page)
-            if zoom_frame:
-                try:
-                    all_tabs = zoom_frame.locator(".ant-tabs-tab")
-                    tab_count = await all_tabs.count()
-                    for t in range(tab_count):
-                        text = await all_tabs.nth(t).inner_text()
-                        if "cloud" in text.lower():
-                            await all_tabs.nth(t).click()
-                            await asyncio.sleep(3)
-                            break
-                except (AttributeError, TypeError):
-                    pass
+            await reload_cloud_tab(page, module_url)
             continue
 
         print(f"  📥 Downloading transcript for: {topic}")
 
         try:
-            from .zoom import fetch_zoom_recording
             fetch_zoom_recording(play_url, rec_password, str(output_path))
             downloaded += 1
         except SystemExit as e:
@@ -271,22 +261,7 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
             failed += 1
 
         await asyncio.sleep(1)
-        await page.goto(module_url, wait_until="networkidle")
-        await asyncio.sleep(3)
-
-        zoom_frame = find_zoom_frame(page)
-        if zoom_frame:
-            try:
-                all_tabs = zoom_frame.locator(".ant-tabs-tab")
-                tab_count = await all_tabs.count()
-                for t in range(tab_count):
-                    text = await all_tabs.nth(t).inner_text()
-                    if "cloud" in text.lower():
-                        await all_tabs.nth(t).click()
-                        await asyncio.sleep(3)
-                        break
-            except (AttributeError, TypeError):
-                pass
+        await reload_cloud_tab(page, module_url)
 
     return downloaded, skipped, failed
 
@@ -320,7 +295,7 @@ async def run(args):
     output_dir = Path(args.output_dir) if args.output_dir != "transcriptions" else Path(config.get("output_dir", "transcriptions"))
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=not args.headed)
+        browser = await p.chromium.launch(headless=True)
         context = await browser.new_context()
         page = await context.new_page()
 
@@ -338,7 +313,7 @@ async def run(args):
                 continue
 
             d, s, f = await process_module(
-                page, module_code, module_url, output_dir, args.skip_existing
+                page, module_code, module_url, output_dir, args.skip_existing, args.latest
             )
             total_downloaded += d
             total_skipped += s
@@ -363,9 +338,8 @@ def main():
     parser.add_argument("--base-url", help="D2L base URL")
     parser.add_argument("--module", help="Process specific module only")
     parser.add_argument("--output-dir", default="transcriptions", help="Output directory")
-    parser.add_argument("--skip-existing", action="store_true", default=True)
     parser.add_argument("--no-skip-existing", action="store_false", dest="skip_existing")
-    parser.add_argument("--headed", action="store_true", help="Run browser in headed mode")
+    parser.add_argument("--latest", action="store_true", help="Only download the latest transcript per module")
 
     args = parser.parse_args()
     asyncio.run(run(args))
