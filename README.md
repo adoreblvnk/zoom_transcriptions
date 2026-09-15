@@ -8,7 +8,7 @@ Automate downloading Zoom transcription recordings from D2L Brightspace.
 
 ```bash
 uv sync
-playwright install chromium
+uv run playwright install chromium
 ```
 
 2. Copy `.env.example` to `.env` and fill in your credentials:

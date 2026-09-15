@@ -10,11 +10,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
+from playwright.async_api import Error as PlaywrightError
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
 from .zoom import fetch_zoom_recording
 
 ZOOM_API_HOST = "applications.zoom.us"
+WAIT_TIMEOUT = 15_000
 
 
 def load_config():
@@ -33,18 +36,22 @@ def sanitize_filename(name: str) -> str:
 async def login_to_d2l(page, email: str, password: str, base_url: str):
     login_url = f"{base_url}/d2l/login"
     print(f"🔐 Navigating to D2L login: {login_url}")
-    await page.goto(login_url, wait_until="networkidle")
+    await page.goto(login_url, wait_until="domcontentloaded")
 
     sit_login = page.locator("#samlLinkId")
     if await sit_login.count() > 0:
         print("  🔗 Clicking SIT Login button...")
         await sit_login.click()
-        await page.wait_for_load_state("networkidle")
+        await page.locator("#userNameInput").wait_for(
+            state="visible", timeout=WAIT_TIMEOUT
+        )
 
     await page.fill("#userNameInput", email)
     await page.fill("#passwordInput", password)
     await page.click("#submitButton")
-    await page.wait_for_load_state("networkidle")
+    await page.wait_for_url(
+        lambda url: "/d2l/login" not in str(url), timeout=WAIT_TIMEOUT
+    )
     print("✅ D2L login successful")
 
 
@@ -55,25 +62,34 @@ def find_zoom_frame(page):
     return None
 
 
-async def switch_to_cloud_tab(zoom_frame):
+async def wait_for_zoom_frame(page):
+    deadline = asyncio.get_running_loop().time() + WAIT_TIMEOUT / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        zoom_frame = find_zoom_frame(page)
+        if zoom_frame:
+            return zoom_frame
+        await asyncio.sleep(0.1)
+    raise TimeoutError(f"Zoom frame did not appear within {WAIT_TIMEOUT}ms")
+
+
+async def switch_to_cloud_tab(zoom_frame, timeout=WAIT_TIMEOUT):
     """Click the Cloud Recordings tab in the Zoom frame."""
-    try:
-        all_tabs = zoom_frame.locator(".ant-tabs-tab")
-        tab_count = await all_tabs.count()
-        for t in range(tab_count):
-            text = await all_tabs.nth(t).inner_text()
-            if "cloud" in text.lower():
-                await all_tabs.nth(t).click()
-                await asyncio.sleep(3)
-                break
-    except (AttributeError, TypeError):
-        pass
+    all_tabs = zoom_frame.locator(".ant-tabs-tab")
+    await all_tabs.first.wait_for(state="attached", timeout=timeout)
+    tab_count = await all_tabs.count()
+    for t in range(tab_count):
+        tab = all_tabs.nth(t)
+        if "cloud" in (await tab.inner_text()).lower():
+            await tab.click()
+            return True
+    return False
 
 
 async def load_recordings(page, url: str):
     """Navigate to Zoom LTI URL, click Cloud Recordings, return list of recordings."""
     found_lti_scid = False
     recordings = []
+    recordings_ready = asyncio.Event()
 
     async def on_response(response):
         nonlocal found_lti_scid, recordings
@@ -87,26 +103,26 @@ async def load_recordings(page, url: str):
             try:
                 data = await response.json()
                 recordings = data.get("result", {}).get("list", [])
-            except (json.JSONDecodeError, KeyError):
+                recordings_ready.set()
+            except (json.JSONDecodeError, KeyError, PlaywrightError):
                 pass
 
     page.on("response", on_response)
-    await page.goto(url, wait_until="networkidle")
-    await asyncio.sleep(5)
-    page.remove_listener("response", on_response)
-
-    if not found_lti_scid:
-        return []
-
-    zoom_frame = find_zoom_frame(page)
-    if not zoom_frame:
-        return []
-
-    recordings = []
-    page.on("response", on_response)
-    await switch_to_cloud_tab(zoom_frame)
-    await asyncio.sleep(2)
-    page.remove_listener("response", on_response)
+    try:
+        await page.goto(url, wait_until="domcontentloaded")
+        zoom_frame = await wait_for_zoom_frame(page)
+        if not await switch_to_cloud_tab(zoom_frame):
+            return []
+        await asyncio.wait_for(recordings_ready.wait(), timeout=WAIT_TIMEOUT / 1000)
+        await zoom_frame.wait_for_function(
+            """() => Array.from(document.querySelectorAll('span[role="button"]'))
+            .some(s => s.textContent.trim().length > 0)""",
+            timeout=WAIT_TIMEOUT,
+        )
+    except TimeoutError:
+        pass
+    finally:
+        page.remove_listener("response", on_response)
 
     return recordings
 
@@ -115,6 +131,7 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
     """Click a recording link, intercept file+pwd responses, return (play_url, password)."""
     play_url = ""
     password = ""
+    details_ready = asyncio.Event()
 
     async def on_response(response):
         nonlocal play_url, password
@@ -136,6 +153,8 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
                 if f.get("fileType") == "MP4" and f.get("playUrl"):
                     play_url = f["playUrl"]
                     break
+        if play_url and password:
+            details_ready.set()
 
     zoom_frame = find_zoom_frame(page)
     if not zoom_frame:
@@ -143,6 +162,16 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
 
     page.on("response", on_response)
 
+    recording_rows = zoom_frame.locator('span[role="button"]')
+    await recording_rows.nth(row_key).wait_for(
+        state="attached", timeout=WAIT_TIMEOUT
+    )
+    await zoom_frame.wait_for_function(
+        """() => Array.from(document.querySelectorAll('span[role="button"]'))
+        .some(s => s.textContent.trim().length > 0)""",
+        timeout=WAIT_TIMEOUT,
+    )
+    play_buttons = zoom_frame.locator(".lti-recording-item-play-media")
     clicked = await zoom_frame.evaluate(f"""
         () => {{
             const spans = Array.from(document.querySelectorAll('span[role="button"]'))
@@ -158,7 +187,7 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
         page.remove_listener("response", on_response)
         return "", ""
 
-    await asyncio.sleep(5)
+    await play_buttons.first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
 
     clicked_play = await zoom_frame.evaluate("""
         () => {
@@ -178,7 +207,12 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
     """)
     print(f"    🖱️  Play click: {clicked_play}")
 
-    await asyncio.sleep(5)
+    try:
+        await asyncio.wait_for(
+            details_ready.wait(), timeout=WAIT_TIMEOUT / 1000
+        )
+    except TimeoutError:
+        pass
     page.remove_listener("response", on_response)
 
     for p in page.context.pages:
@@ -190,11 +224,10 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
 
 async def reload_cloud_tab(page, module_url):
     """Navigate back to module and switch to cloud recordings tab."""
-    await page.goto(module_url, wait_until="networkidle")
-    await asyncio.sleep(3)
-    zoom_frame = find_zoom_frame(page)
-    if zoom_frame:
-        await switch_to_cloud_tab(zoom_frame)
+    await page.goto(module_url, wait_until="domcontentloaded")
+    zoom_frame = await wait_for_zoom_frame(page)
+    if not await switch_to_cloud_tab(zoom_frame):
+        raise RuntimeError("Cloud Recordings tab was not found after module reload")
 
 
 async def process_module(page, module_code, module_url, output_dir, skip_existing, latest=False):
@@ -260,8 +293,16 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
             print(f"  ❌ Failed to download '{topic}': {e}")
             failed += 1
 
-        await asyncio.sleep(1)
-        await reload_cloud_tab(page, module_url)
+        zoom_frame = find_zoom_frame(page)
+        if zoom_frame:
+            try:
+                cloud_tab_ready = await switch_to_cloud_tab(zoom_frame, timeout=2_000)
+            except PlaywrightTimeoutError:
+                cloud_tab_ready = False
+            if not cloud_tab_ready:
+                await reload_cloud_tab(page, module_url)
+        else:
+            await reload_cloud_tab(page, module_url)
 
     return downloaded, skipped, failed
 
