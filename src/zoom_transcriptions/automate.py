@@ -162,58 +162,58 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
 
     page.on("response", on_response)
 
-    recording_rows = zoom_frame.locator('span[role="button"]')
-    await recording_rows.nth(row_key).wait_for(
-        state="attached", timeout=WAIT_TIMEOUT
-    )
-    await zoom_frame.wait_for_function(
-        """() => Array.from(document.querySelectorAll('span[role="button"]'))
-        .some(s => s.textContent.trim().length > 0)""",
-        timeout=WAIT_TIMEOUT,
-    )
-    play_buttons = zoom_frame.locator(".lti-recording-item-play-media")
-    clicked = await zoom_frame.evaluate(f"""
-        () => {{
-            const spans = Array.from(document.querySelectorAll('span[role="button"]'))
-                .filter(s => s.textContent.trim().length > 0);
-            if ({row_key} >= spans.length) return 'out-of-range: ' + spans.length;
-            spans[{row_key}].click();
-            return 'clicked: ' + spans[{row_key}].textContent.trim();
-        }}
-    """)
-    print(f"    📋 List click: {clicked}")
-
-    if "out-of-range" in clicked or "not-found" in clicked:
-        page.remove_listener("response", on_response)
-        return "", ""
-
-    await play_buttons.first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
-
-    clicked_play = await zoom_frame.evaluate("""
-        () => {
-            const playBtns = document.querySelectorAll('.lti-recording-item-play-media');
-            if (playBtns.length === 0) return 'no-play-btns';
-            for (let i = 0; i < playBtns.length; i++) {
-                const icon = playBtns[i].querySelector('i[aria-label]');
-                const label = icon ? icon.getAttribute('aria-label') : '';
-                if (label.includes('Recording') && !label.includes('Audio')) {
-                    playBtns[i].click();
-                    return 'clicked-video: ' + label;
-                }
-            }
-            playBtns[0].click();
-            return 'clicked-first: ' + playBtns.length;
-        }
-    """)
-    print(f"    🖱️  Play click: {clicked_play}")
-
     try:
-        await asyncio.wait_for(
-            details_ready.wait(), timeout=WAIT_TIMEOUT / 1000
+        await zoom_frame.wait_for_function(
+            """() => Array.from(document.querySelectorAll('span[role="button"]'))
+            .some(s => s.textContent.trim().length > 0)""",
+            timeout=WAIT_TIMEOUT,
         )
-    except TimeoutError:
+
+        clicked = await zoom_frame.evaluate(f"""
+            () => {{
+                const spans = Array.from(document.querySelectorAll('span[role="button"]'))
+                    .filter(s => s.textContent.trim().length > 0);
+                if ({row_key} >= spans.length) return 'out-of-range: ' + spans.length;
+                spans[{row_key}].click();
+                return 'clicked: ' + spans[{row_key}].textContent.trim();
+            }}
+        """)
+        print(f"    📋 List click: {clicked}")
+
+        if "out-of-range" in clicked or "not-found" in clicked:
+            return "", ""
+
+        play_buttons = zoom_frame.locator(".lti-recording-item-play-media")
+        await play_buttons.first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
+
+        clicked_play = await zoom_frame.evaluate("""
+            () => {
+                const playBtns = document.querySelectorAll('.lti-recording-item-play-media');
+                if (playBtns.length === 0) return 'no-play-btns';
+                for (let i = 0; i < playBtns.length; i++) {
+                    const icon = playBtns[i].querySelector('i[aria-label]');
+                    const label = icon ? icon.getAttribute('aria-label') : '';
+                    if (label.includes('Recording') && !label.includes('Audio')) {
+                        playBtns[i].click();
+                        return 'clicked-video: ' + label;
+                    }
+                }
+                playBtns[0].click();
+                return 'clicked-first: ' + playBtns.length;
+            }
+        """)
+        print(f"    🖱️  Play click: {clicked_play}")
+
+        try:
+            await asyncio.wait_for(
+                details_ready.wait(), timeout=WAIT_TIMEOUT / 1000
+            )
+        except TimeoutError:
+            pass
+    except PlaywrightTimeoutError:
         pass
-    page.remove_listener("response", on_response)
+    finally:
+        page.remove_listener("response", on_response)
 
     for p in page.context.pages:
         if p != page:
@@ -293,16 +293,7 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
             print(f"  ❌ Failed to download '{topic}': {e}")
             failed += 1
 
-        zoom_frame = find_zoom_frame(page)
-        if zoom_frame:
-            try:
-                cloud_tab_ready = await switch_to_cloud_tab(zoom_frame, timeout=2_000)
-            except PlaywrightTimeoutError:
-                cloud_tab_ready = False
-            if not cloud_tab_ready:
-                await reload_cloud_tab(page, module_url)
-        else:
-            await reload_cloud_tab(page, module_url)
+        await reload_cloud_tab(page, module_url)
 
     return downloaded, skipped, failed
 
