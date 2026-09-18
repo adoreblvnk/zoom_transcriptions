@@ -7,7 +7,6 @@ import os
 import re
 import sys
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
@@ -87,19 +86,14 @@ async def switch_to_cloud_tab(zoom_frame, timeout=WAIT_TIMEOUT):
 
 async def load_recordings(page, url: str):
     """Navigate to Zoom LTI URL, click Cloud Recordings, return list of recordings."""
-    found_lti_scid = False
     recordings = []
     recordings_ready = asyncio.Event()
 
     async def on_response(response):
-        nonlocal found_lti_scid, recordings
+        nonlocal recordings
         if ZOOM_API_HOST not in response.url:
             return
-        if "lti_scid" in response.url:
-            params = parse_qs(urlparse(response.url).query)
-            if "lti_scid" in params:
-                found_lti_scid = True
-        if "/COURSE" in response.url:
+        if "recording/COURSE" in response.url:
             try:
                 data = await response.json()
                 recordings = data.get("result", {}).get("list", [])
@@ -114,11 +108,12 @@ async def load_recordings(page, url: str):
         if not await switch_to_cloud_tab(zoom_frame):
             return []
         await asyncio.wait_for(recordings_ready.wait(), timeout=WAIT_TIMEOUT / 1000)
-        await zoom_frame.wait_for_function(
-            """() => Array.from(document.querySelectorAll('span[role="button"]'))
-            .some(s => s.textContent.trim().length > 0)""",
-            timeout=WAIT_TIMEOUT,
-        )
+        if recordings:
+            await zoom_frame.wait_for_function(
+                """() => Array.from(document.querySelectorAll('span[role="button"]'))
+                .some(s => s.textContent.trim().length > 0)""",
+                timeout=WAIT_TIMEOUT,
+            )
     except TimeoutError:
         pass
     finally:
