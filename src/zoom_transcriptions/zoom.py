@@ -53,21 +53,7 @@ def parse_vtt_to_markdown(vtt_text: str, title: str = "") -> str:
     return "\n\n".join(md_lines)
 
 
-def fetch_zoom_recording_text(url: str, password: str) -> str:
-    """Like fetch_zoom_recording but returns the markdown string instead of writing to disk."""
-    import tempfile
-
-    tmp = tempfile.NamedTemporaryFile(suffix=".md", delete=False)
-    tmp.close()
-    tmp_path = tmp.name
-    try:
-        fetch_zoom_recording(url, password, output_md=tmp_path)
-        return Path(tmp_path).read_text(encoding="utf-8")
-    finally:
-        Path(tmp_path).unlink(missing_ok=True)
-
-
-def fetch_zoom_recording(url: str, password: str, output_md: str = "transcript.md"):
+def fetch_zoom_recording(url: str, password: str, output_md: str | None = "transcript.md") -> str:
     """Fetches Zoom transcript or downloads video and runs local transcription script."""
     parsed = urllib.parse.urlparse(url)
     if not parsed.scheme or not parsed.netloc:
@@ -178,9 +164,10 @@ def fetch_zoom_recording(url: str, password: str, output_md: str = "transcript.m
             with opener.open(req) as resp:
                 vtt_text = resp.read().decode("utf-8")
                 md_content = parse_vtt_to_markdown(vtt_text, title=topic)
-                Path(output_md).write_text(md_content, encoding="utf-8")
-                print(f"✅ Transcript saved successfully to {output_md}")
-                return
+                if output_md:
+                    Path(output_md).write_text(md_content, encoding="utf-8")
+                    print(f"✅ Transcript saved successfully to {output_md}")
+                return md_content
         except Exception as e:
             print(f"⚠️ Failed to download transcript file: {e}. Falling back to video download...")
 
@@ -235,6 +222,7 @@ def fetch_zoom_recording(url: str, password: str, output_md: str = "transcript.m
     result = subprocess.run(cmd)
     if result.returncode != 0:
         sys.exit(f"❌ Transcription via main.py failed with exit code {result.returncode}")
+    return ""
 
 
 def main():

@@ -13,7 +13,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
-from .zoom import fetch_zoom_recording, fetch_zoom_recording_text
+from .zoom import fetch_zoom_recording
 
 ZOOM_API_HOST = "applications.zoom.us"
 WAIT_TIMEOUT = 15_000
@@ -287,7 +287,7 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
                 parts = []
                 for idx, part_url in enumerate(play_urls, start=1):
                     print(f"    📄 Part {idx}/{len(play_urls)}...")
-                    parts.append(fetch_zoom_recording_text(part_url, rec_password))
+                    parts.append(fetch_zoom_recording(part_url, rec_password, None))
                 output_path.write_text("\n\n".join(parts), encoding="utf-8")
                 print(f"✅ Combined transcript saved to {output_path}")
             downloaded += 1
