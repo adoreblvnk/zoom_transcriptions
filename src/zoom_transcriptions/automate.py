@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -250,7 +251,7 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
     for i, recording in enumerate(recordings):
         topic = recording.get("topic", "Unknown Recording")
         start_time = recording.get("startTime", "")
-        date_str = start_time.split(" ")[0] if start_time else "unknown_date"
+        date_str = datetime.fromisoformat(start_time).strftime("%Y-%m-%d") if start_time else "unknown_date"
         filename = sanitize_filename(f"{topic}_{date_str}")
         output_path = module_dir / f"{filename}.md"
 
