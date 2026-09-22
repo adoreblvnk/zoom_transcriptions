@@ -321,8 +321,10 @@ async def run(args):
         sys.exit(1)
 
     if args.module:
-        if args.module in modules:
-            modules = {args.module: modules[args.module]}
+        module_upper = args.module.upper()
+        matched = [k for k in modules if k.upper() == module_upper]
+        if matched:
+            modules = {matched[0]: modules[matched[0]]}
         else:
             print(f"❌ Unknown module: {args.module}")
             sys.exit(1)
