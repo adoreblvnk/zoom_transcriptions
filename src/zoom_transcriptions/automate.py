@@ -13,7 +13,7 @@ from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 
-from .zoom import fetch_zoom_recording
+from .zoom import fetch_zoom_recording, fetch_zoom_recording_text
 
 ZOOM_API_HOST = "applications.zoom.us"
 WAIT_TIMEOUT = 15_000
@@ -122,14 +122,14 @@ async def load_recordings(page, url: str):
     return recordings
 
 
-async def get_recording_details(page, row_key: int) -> tuple[str, str]:
-    """Click a recording link, intercept file+pwd responses, return (play_url, password)."""
-    play_url = ""
+async def get_recording_details(page, row_key: int) -> tuple[list[str], str]:
+    """Click a recording link, intercept file+pwd responses, return (play_urls, password)."""
+    play_urls: list[str] = []
     password = ""
     details_ready = asyncio.Event()
 
     async def on_response(response):
-        nonlocal play_url, password
+        nonlocal play_urls, password
         if ZOOM_API_HOST not in response.url:
             return
         try:
@@ -146,14 +146,13 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
         elif "/file" in response.url:
             for f in data.get("result", {}).get("recordingFiles", []):
                 if f.get("fileType") == "MP4" and f.get("playUrl"):
-                    play_url = f["playUrl"]
-                    break
-        if play_url and password:
+                    play_urls.append(f["playUrl"])
+        if play_urls and password:
             details_ready.set()
 
     zoom_frame = find_zoom_frame(page)
     if not zoom_frame:
-        return "", ""
+        return [], ""
 
     page.on("response", on_response)
 
@@ -176,7 +175,7 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
         print(f"    📋 List click: {clicked}")
 
         if "out-of-range" in clicked or "not-found" in clicked:
-            return "", ""
+            return [], ""
 
         play_buttons = zoom_frame.locator(".lti-recording-item-play-media")
         await play_buttons.first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
@@ -214,7 +213,7 @@ async def get_recording_details(page, row_key: int) -> tuple[str, str]:
         if p != page:
             await p.close()
 
-    return play_url, password
+    return play_urls, password
 
 
 async def reload_cloud_tab(page, module_url):
@@ -262,27 +261,35 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
 
         print(f"  📥 Getting details for: {topic} ({start_time})")
 
-        play_url = ""
+        play_urls = []
         rec_password = ""
         for attempt in range(3):
-            play_url, rec_password = await get_recording_details(page, i)
-            if play_url and rec_password:
+            play_urls, rec_password = await get_recording_details(page, i)
+            if play_urls and rec_password:
                 break
             if attempt < 2:
                 print(f"    🔄 Retrying (attempt {attempt + 2})...")
                 await asyncio.sleep(2)
                 await reload_cloud_tab(page, module_url)
 
-        if not play_url or not rec_password:
+        if not play_urls or not rec_password:
             print(f"  ⚠️  Could not get details for '{topic}'")
             failed += 1
             await reload_cloud_tab(page, module_url)
             continue
 
-        print(f"  📥 Downloading transcript for: {topic}")
+        print(f"  📥 Downloading transcript for: {topic} ({len(play_urls)} part(s))")
 
         try:
-            fetch_zoom_recording(play_url, rec_password, str(output_path))
+            if len(play_urls) == 1:
+                fetch_zoom_recording(play_urls[0], rec_password, str(output_path))
+            else:
+                parts = []
+                for idx, part_url in enumerate(play_urls, start=1):
+                    print(f"    📄 Part {idx}/{len(play_urls)}...")
+                    parts.append(fetch_zoom_recording_text(part_url, rec_password))
+                output_path.write_text("\n\n".join(parts), encoding="utf-8")
+                print(f"✅ Combined transcript saved to {output_path}")
             downloaded += 1
         except SystemExit as e:
             print(f"  ❌ Failed to download '{topic}': {e}")

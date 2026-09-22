@@ -53,6 +53,20 @@ def parse_vtt_to_markdown(vtt_text: str, title: str = "") -> str:
     return "\n\n".join(md_lines)
 
 
+def fetch_zoom_recording_text(url: str, password: str) -> str:
+    """Like fetch_zoom_recording but returns the markdown string instead of writing to disk."""
+    import tempfile
+
+    tmp = tempfile.NamedTemporaryFile(suffix=".md", delete=False)
+    tmp.close()
+    tmp_path = tmp.name
+    try:
+        fetch_zoom_recording(url, password, output_md=tmp_path)
+        return Path(tmp_path).read_text(encoding="utf-8")
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def fetch_zoom_recording(url: str, password: str, output_md: str = "transcript.md"):
     """Fetches Zoom transcript or downloads video and runs local transcription script."""
     parsed = urllib.parse.urlparse(url)
