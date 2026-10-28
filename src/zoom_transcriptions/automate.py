@@ -8,6 +8,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
@@ -53,6 +54,81 @@ async def login_to_d2l(page, email: str, password: str, base_url: str):
         lambda url: "/d2l/login" not in str(url), timeout=WAIT_TIMEOUT
     )
     print("✅ D2L login successful")
+
+
+def get_org_unit_id(module_url: str) -> str:
+    """Extract the Brightspace course org unit ID from a module URL."""
+    values = parse_qs(urlparse(module_url).query).get("ou", [])
+    if not values or not values[0].isdigit():
+        raise ValueError(f"Could not find a numeric course ID in module URL: {module_url}")
+    return values[0]
+
+
+async def load_announcements(page, module_url: str) -> list[dict[str, str]]:
+    """Load announcements from the Brightspace course news page."""
+    org_unit_id = get_org_unit_id(module_url)
+    parsed_url = urlparse(module_url)
+    announcements_url = (
+        f"{parsed_url.scheme}://{parsed_url.netloc}/d2l/le/news/{org_unit_id}/"
+    )
+    await page.goto(announcements_url, wait_until="domcontentloaded")
+
+    try:
+        await page.locator(
+            ".d2l-le-activity, .d2l-news-item, article, "
+            "[data-testid*='announcement' i]"
+        ).first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
+    except PlaywrightTimeoutError:
+        return []
+
+    return await page.evaluate(
+        """() => {
+            const selectors = [
+                '.d2l-le-activity',
+                '.d2l-news-item',
+                'article',
+                '[data-testid*="announcement" i]'
+            ];
+            let nodes = [];
+            for (const selector of selectors) {
+                nodes = Array.from(document.querySelectorAll(selector));
+                if (nodes.length) break;
+            }
+
+            const clean = value => value.replace(/\\s+/g, ' ').trim();
+            return nodes.map(node => {
+                const heading = node.querySelector(
+                    'h1, h2, h3, h4, h5, h6, [role="heading"]'
+                );
+                const date = node.querySelector(
+                    'time, .d2l-le-activity-date, [class*="date" i]'
+                );
+                const body = node.querySelector(
+                    '.d2l-le-activity-description, .d2l-news-item-description, '
+                    '[class*="description" i], [class*="content" i]'
+                );
+                const fullText = clean(node.innerText || '');
+                const title = clean(heading?.innerText || '');
+                const dateText = clean(date?.innerText || date?.getAttribute('datetime') || '');
+                const bodyText = clean(body?.innerText || fullText);
+                return { title, date: dateText, body: bodyText };
+            }).filter(item => item.title || item.body);
+        }"""
+    )
+
+
+def announcements_to_markdown(announcements: list[dict[str, str]]) -> str:
+    """Render announcements as a readable Markdown document."""
+    lines = ["# Announcements", ""]
+    for announcement in announcements:
+        title = announcement["title"] or "Untitled announcement"
+        lines.append(f"## {title}")
+        if announcement["date"]:
+            lines.extend(["", f"*{announcement['date']}*"])
+        if announcement["body"]:
+            lines.extend(["", announcement["body"]])
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def find_zoom_frame(page):
@@ -236,6 +312,19 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
     downloaded = 0
     skipped = 0
     failed = 0
+
+    announcements_path = module_dir / "announcements.md"
+    try:
+        announcements = await load_announcements(page, module_url)
+        if announcements:
+            announcements_path.write_text(
+                announcements_to_markdown(announcements), encoding="utf-8"
+            )
+            print(f"  📢 Saved {len(announcements)} announcement(s) to {announcements_path}")
+        else:
+            print("  📢 No announcements found")
+    except (ValueError, PlaywrightError) as e:
+        print(f"  ⚠️  Could not load announcements: {e}")
 
     recordings = await load_recordings(page, module_url)
     if not recordings:

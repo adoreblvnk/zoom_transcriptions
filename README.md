@@ -65,12 +65,13 @@ uv run zoom-transcriptions --no-skip-existing   # re-download all
 1. Logs into D2L via ADFS SAML authentication
 2. Navigates to the Zoom LTI page for each module
 3. Clicks the "Cloud Recordings" tab
-4. For each recording:
+4. Loads course announcements from Brightspace
+5. For each recording:
    - Clicks the recording link to open details
    - Clicks the video play button
    - Intercepts the Zoom API responses to get the play URL and password
    - Downloads the transcript using the existing `fetch_zoom_recording` function
-5. Saves transcripts as Markdown files in the configured output directory
+6. Saves announcements and transcripts as Markdown files in the configured output directory
 
 ## Output
 
@@ -79,6 +80,7 @@ Transcripts are saved as:
 ```
 transcriptions/
   INF2004/
+    announcements.md
     INF2004_LECTURE_2026-09-14.md
     INF2004_LECTURE_2026-09-07.md
     Group_Project_Briefing_2026-08-31.md
