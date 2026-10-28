@@ -65,17 +65,55 @@ def get_org_unit_id(module_url: str) -> str:
 
 
 async def load_announcements(page, module_url: str) -> list[dict[str, str]]:
-    """Load announcements from the Brightspace course news page."""
+    """Load announcements from the Brightspace News API or page."""
     org_unit_id = get_org_unit_id(module_url)
     parsed_url = urlparse(module_url)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    api_url = f"{base_url}/d2l/api/le/1.75/news/{org_unit_id}/items/"
+    api_result = await page.evaluate(
+        """async (url) => {
+            const response = await fetch(url, {
+                credentials: 'include',
+                headers: { Accept: 'application/json' }
+            });
+            return { status: response.status, text: await response.text() };
+        }""",
+        api_url,
+    )
+    if api_result["status"] == 200:
+        try:
+            items = json.loads(api_result["text"])
+            if isinstance(items, list):
+                return [
+                    {
+                        "title": item.get("Title", ""),
+                        "date": item.get("StartDate", ""),
+                        "body": re.sub(
+                            r"\s+",
+                            " ",
+                            re.sub(
+                                r"<[^>]+>",
+                                " ",
+                                item.get("Body", {}).get("Html", "")
+                                if isinstance(item.get("Body"), dict)
+                                else item.get("Body", ""),
+                            ),
+                        ).strip(),
+                    }
+                    for item in items
+                    if item.get("Title") or item.get("Body")
+                ]
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            pass
+
     announcements_url = (
-        f"{parsed_url.scheme}://{parsed_url.netloc}/d2l/le/news/{org_unit_id}/"
+        f"{base_url}/d2l/le/news/{org_unit_id}/"
     )
     await page.goto(announcements_url, wait_until="domcontentloaded")
 
     try:
         await page.locator(
-            ".d2l-le-activity, .d2l-news-item, article, "
+            ".d2l-news-item, .d2l-le-activity, "
             "[data-testid*='announcement' i]"
         ).first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
     except PlaywrightTimeoutError:
@@ -84,9 +122,8 @@ async def load_announcements(page, module_url: str) -> list[dict[str, str]]:
     return await page.evaluate(
         """() => {
             const selectors = [
-                '.d2l-le-activity',
                 '.d2l-news-item',
-                'article',
+                '.d2l-le-activity',
                 '[data-testid*="announcement" i]'
             ];
             let nodes = [];
