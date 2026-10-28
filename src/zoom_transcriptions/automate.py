@@ -82,27 +82,35 @@ async def load_announcements(page, module_url: str) -> list[dict[str, str]]:
     )
     if api_result["status"] == 200:
         try:
-            items = json.loads(api_result["text"])
+            payload = json.loads(api_result["text"])
+            if isinstance(payload, list):
+                items = payload
+            elif isinstance(payload, dict):
+                items = next(
+                    (
+                        payload.get(key)
+                        for key in ("Items", "items", "Objects", "objects", "Results")
+                        if isinstance(payload.get(key), list)
+                    ),
+                    [],
+                )
+            else:
+                items = []
             if isinstance(items, list):
-                return [
-                    {
-                        "title": item.get("Title", ""),
+                announcements = []
+                for item in items:
+                    body = item.get("Content", item.get("Body", ""))
+                    if isinstance(body, dict):
+                        body = body.get("Html", body.get("html", ""))
+                    body = re.sub(r"<[^>]+>", " ", body or "")
+                    announcement = {
+                        "title": item.get("Headline", item.get("Title", "")),
                         "date": item.get("StartDate", ""),
-                        "body": re.sub(
-                            r"\s+",
-                            " ",
-                            re.sub(
-                                r"<[^>]+>",
-                                " ",
-                                item.get("Body", {}).get("Html", "")
-                                if isinstance(item.get("Body"), dict)
-                                else item.get("Body", ""),
-                            ),
-                        ).strip(),
+                        "body": re.sub(r"\s+", " ", body).strip(),
                     }
-                    for item in items
-                    if item.get("Title") or item.get("Body")
-                ]
+                    if announcement["title"] or announcement["body"]:
+                        announcements.append(announcement)
+                return announcements
         except (json.JSONDecodeError, AttributeError, TypeError):
             pass
 
