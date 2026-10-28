@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import html
 import json
 import os
 import re
@@ -65,101 +66,46 @@ def get_org_unit_id(module_url: str) -> str:
 
 
 async def load_announcements(page, module_url: str) -> list[dict[str, str]]:
-    """Load announcements from the Brightspace News API or page."""
+    """Load announcements from the Brightspace News page and detail links."""
     org_unit_id = get_org_unit_id(module_url)
     parsed_url = urlparse(module_url)
     base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-    api_url = f"{base_url}/d2l/api/le/1.75/news/{org_unit_id}/items/"
-    api_result = await page.evaluate(
-        """async (url) => {
-            const response = await fetch(url, {
-                credentials: 'include',
-                headers: { Accept: 'application/json' }
-            });
-            return { status: response.status, text: await response.text() };
-        }""",
-        api_url,
-    )
-    if api_result["status"] == 200:
-        try:
-            payload = json.loads(api_result["text"])
-            if isinstance(payload, list):
-                items = payload
-            elif isinstance(payload, dict):
-                items = next(
-                    (
-                        payload.get(key)
-                        for key in ("Items", "items", "Objects", "objects", "Results")
-                        if isinstance(payload.get(key), list)
-                    ),
-                    [],
-                )
-            else:
-                items = []
-            if isinstance(items, list):
-                announcements = []
-                for item in items:
-                    body = item.get("Content", item.get("Body", ""))
-                    if isinstance(body, dict):
-                        body = body.get("Html", body.get("html", ""))
-                    body = re.sub(r"<[^>]+>", " ", body or "")
-                    announcement = {
-                        "title": item.get("Headline", item.get("Title", "")),
-                        "date": item.get("StartDate", ""),
-                        "body": re.sub(r"\s+", " ", body).strip(),
-                    }
-                    if announcement["title"] or announcement["body"]:
-                        announcements.append(announcement)
-                return announcements
-        except (json.JSONDecodeError, AttributeError, TypeError):
-            pass
-
-    announcements_url = (
-        f"{base_url}/d2l/le/news/{org_unit_id}/"
-    )
+    announcements_url = f"{base_url}/d2l/lms/news/main.d2l?ou={org_unit_id}"
     await page.goto(announcements_url, wait_until="domcontentloaded")
-
-    try:
-        await page.locator(
-            ".d2l-news-item, .d2l-le-activity, "
-            "[data-testid*='announcement' i]"
-        ).first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
-    except PlaywrightTimeoutError:
-        return []
-
-    return await page.evaluate(
-        """() => {
-            const selectors = [
-                '.d2l-news-item',
-                '.d2l-le-activity',
-                '[data-testid*="announcement" i]'
-            ];
-            let nodes = [];
-            for (const selector of selectors) {
-                nodes = Array.from(document.querySelectorAll(selector));
-                if (nodes.length) break;
-            }
-
-            const clean = value => value.replace(/\\s+/g, ' ').trim();
-            return nodes.map(node => {
-                const heading = node.querySelector(
-                    'h1, h2, h3, h4, h5, h6, [role="heading"]'
-                );
-                const date = node.querySelector(
-                    'time, .d2l-le-activity-date, [class*="date" i]'
-                );
-                const body = node.querySelector(
-                    '.d2l-le-activity-description, .d2l-news-item-description, '
-                    '[class*="description" i], [class*="content" i]'
-                );
-                const fullText = clean(node.innerText || '');
-                const title = clean(heading?.innerText || '');
-                const dateText = clean(date?.innerText || date?.getAttribute('datetime') || '');
-                const bodyText = clean(body?.innerText || fullText);
-                return { title, date: dateText, body: bodyText };
-            }).filter(item => item.title || item.body);
-        }"""
+    links = await page.locator("a[href*='/d2l/le/news/'][href*='/view']").evaluate_all(
+        "(links) => links.map(link => ({href: link.getAttribute('href'), title: link.innerText.trim()}))"
     )
+    announcements = []
+    for link in links:
+        await page.locator(f"a[href='{link['href']}']").click()
+        await page.wait_for_load_state("domcontentloaded")
+        announcement = await page.evaluate(
+            """() => {
+                const clean = value => value.replace(/\\s+/g, ' ').trim();
+                const body = document.querySelector('d2l-html-block')?.getAttribute('html') || '';
+                const heading = document.querySelector('h1.d2l-page-title');
+                const metadata = document.querySelector('.d2l-textblock');
+                return {
+                    title: clean(heading?.innerText || ''),
+                    date: clean(metadata?.innerText || ''),
+                    body
+                };
+            }"""
+        )
+        announcement["body"] = re.sub(
+            r"\s+",
+            " ",
+            re.sub(r"<[^>]+>", " ", html.unescape(announcement["body"])),
+        ).strip()
+        announcement["date"] = re.sub(
+            r"Your session expires after .*?logging out\.\s*",
+            "",
+            announcement["date"],
+        ).strip()
+        if announcement["title"] or announcement["body"]:
+            announcements.append(announcement)
+        await page.goto(announcements_url, wait_until="domcontentloaded")
+    return announcements
 
 
 def announcements_to_markdown(announcements: list[dict[str, str]]) -> str:
