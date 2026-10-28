@@ -98,7 +98,7 @@ async def load_announcements(page, module_url: str) -> list[dict[str, str]]:
             re.sub(r"<[^>]+>", " ", html.unescape(announcement["body"])),
         ).strip()
         announcement["date"] = re.sub(
-            r"Your session expires after .*?logging out\.\s*",
+            r"Your session expires after .*?stay logged in\.\s*",
             "",
             announcement["date"],
         ).strip()
