@@ -20,7 +20,7 @@ from .zoom import fetch_zoom_recording
 
 ZOOM_API_HOST = "applications.zoom.us"
 WAIT_TIMEOUT = 15_000
-
+PROFILE_DIR = Path.home() / ".cache" / "zoom_transcriptions" / "chromium"
 
 def load_config():
     config_path = Path(__file__).parent / "config.json"
@@ -36,9 +36,12 @@ def sanitize_filename(name: str) -> str:
 
 
 async def login_to_d2l(page, email: str, password: str, base_url: str):
-    login_url = f"{base_url}/d2l/login"
-    print(f"🔐 Navigating to D2L login: {login_url}")
-    await page.goto(login_url, wait_until="domcontentloaded")
+    home_url = f"{base_url}/d2l/home"
+    print(f"🔐 Checking D2L session: {home_url}")
+    await page.goto(home_url, wait_until="load")
+    if "/d2l/home" in page.url:
+        print("✅ D2L session already active")
+        return
 
     sit_login = page.locator("#samlLinkId")
     if await sit_login.count() > 0:
@@ -52,7 +55,8 @@ async def login_to_d2l(page, email: str, password: str, base_url: str):
     await page.fill("#passwordInput", password)
     await page.click("#submitButton")
     await page.wait_for_url(
-        lambda url: "/d2l/login" not in str(url), timeout=WAIT_TIMEOUT
+        lambda url: str(url).startswith(base_url) and "/d2l/login" not in str(url),
+        timeout=WAIT_TIMEOUT,
     )
     print("✅ D2L login successful")
 
@@ -120,7 +124,6 @@ def announcements_to_markdown(announcements: list[dict[str, str]]) -> str:
             lines.extend(["", announcement["body"]])
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
-
 
 def find_zoom_frame(page):
     for frame in page.frames:
@@ -190,8 +193,8 @@ async def load_recordings(page, url: str):
     return recordings
 
 
-async def get_recording_details(page, row_key: int) -> tuple[list[str], str]:
-    """Click a recording link, intercept file+pwd responses, return (play_urls, password)."""
+async def get_recording_details(page, row_key: int) -> tuple[list[str], str, object | None]:
+    """Click a recording link, intercept file+pwd responses, return (play_urls, password, popup)."""
     play_urls: list[str] = []
     password = ""
     details_ready = asyncio.Event()
@@ -220,7 +223,7 @@ async def get_recording_details(page, row_key: int) -> tuple[list[str], str]:
 
     zoom_frame = find_zoom_frame(page)
     if not zoom_frame:
-        return [], ""
+        return [], "", None
 
     page.on("response", on_response)
 
@@ -243,7 +246,7 @@ async def get_recording_details(page, row_key: int) -> tuple[list[str], str]:
         print(f"    📋 List click: {clicked}")
 
         if "out-of-range" in clicked or "not-found" in clicked:
-            return [], ""
+            return [], "", None
 
         play_buttons = zoom_frame.locator(".lti-recording-item-play-media")
         await play_buttons.first.wait_for(state="attached", timeout=WAIT_TIMEOUT)
@@ -277,11 +280,8 @@ async def get_recording_details(page, row_key: int) -> tuple[list[str], str]:
     finally:
         page.remove_listener("response", on_response)
 
-    for p in page.context.pages:
-        if p != page:
-            await p.close()
-
-    return play_urls, password
+    popup = next((p for p in page.context.pages if p != page), None)
+    return play_urls, password, popup
 
 
 async def reload_cloud_tab(page, module_url):
@@ -292,7 +292,7 @@ async def reload_cloud_tab(page, module_url):
         raise RuntimeError("Cloud Recordings tab was not found after module reload")
 
 
-async def process_module(page, module_code, module_url, output_dir, skip_existing, latest=False):
+async def process_module(page, module_code, module_url, output_dir, skip_existing, latest=False, headed=False):
     print(f"\n{'='*60}")
     print(f"📚 Module: {module_code}")
     print(f"{'='*60}")
@@ -344,10 +344,15 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
 
         play_urls = []
         rec_password = ""
+        zoom_page = None
         for attempt in range(3):
-            play_urls, rec_password = await get_recording_details(page, i)
+            play_urls, rec_password, zoom_page = await get_recording_details(page, i)
             if play_urls and rec_password:
                 break
+            for extra in list(page.context.pages):
+                if extra != page:
+                    await extra.close()
+            zoom_page = None
             if attempt < 2:
                 print(f"    🔄 Retrying (attempt {attempt + 2})...")
                 await asyncio.sleep(2)
@@ -362,22 +367,29 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
         print(f"  📥 Downloading transcript for: {topic} ({len(play_urls)} part(s))")
 
         try:
-            if len(play_urls) == 1:
-                fetch_zoom_recording(play_urls[0], rec_password, str(output_path))
-            else:
-                parts = []
-                for idx, part_url in enumerate(play_urls, start=1):
+            if zoom_page is None:
+                zoom_page = await page.context.new_page()
+            parts = []
+            for idx, part_url in enumerate(play_urls, start=1):
+                if len(play_urls) > 1:
                     print(f"    📄 Part {idx}/{len(play_urls)}...")
-                    parts.append(fetch_zoom_recording(part_url, rec_password, None))
-                output_path.write_text("\n\n".join(parts), encoding="utf-8")
-                print(f"✅ Combined transcript saved to {output_path}")
+                parts.append(
+                    await fetch_zoom_recording(
+                        zoom_page, part_url, rec_password, headed=headed
+                    )
+                )
+            output_path.write_text("\n\n".join(parts), encoding="utf-8")
+            print(f"✅ Transcript saved to {output_path}")
             downloaded += 1
-        except SystemExit as e:
-            print(f"  ❌ Failed to download '{topic}': {e}")
+        except (RuntimeError, PlaywrightError, TimeoutError) as e:
+            print(f"  ❌ Failed to download '{topic}': {str(e) or type(e).__name__}")
             failed += 1
+        finally:
+            for extra in list(page.context.pages):
+                if extra != page:
+                    await extra.close()
 
         await reload_cloud_tab(page, module_url)
-
     return downloaded, skipped, failed
 
 
@@ -411,33 +423,40 @@ async def run(args):
 
     output_dir = Path(args.output_dir) if args.output_dir != "transcriptions" else Path(config.get("output_dir", "transcriptions"))
 
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
-        page = await context.new_page()
+        context = await p.chromium.launch_persistent_context(
+            str(PROFILE_DIR), headless=not args.headed
+        )
+        try:
+            page = context.pages[0] if context.pages else await context.new_page()
 
-        print("🔐 Logging into D2L...")
-        await login_to_d2l(page, email, password, base_url)
+            await login_to_d2l(page, email, password, base_url)
 
-        total_downloaded = 0
-        total_skipped = 0
-        total_failed = 0
+            total_downloaded = 0
+            total_skipped = 0
+            total_failed = 0
 
-        for module_code, module_config in modules.items():
-            module_url = module_config.get("url", "")
-            if not module_url:
-                print(f"❌ No URL for module: {module_code}")
-                continue
+            for module_code, module_config in modules.items():
+                module_url = module_config.get("url", "")
+                if not module_url:
+                    print(f"❌ No URL for module: {module_code}")
+                    continue
 
-            d, s, f = await process_module(
-                page, module_code, module_url, output_dir, args.skip_existing, args.latest
-            )
-            total_downloaded += d
-            total_skipped += s
-            total_failed += f
-
-        await browser.close()
-
+                d, s, f = await process_module(
+                    page,
+                    module_code,
+                    module_url,
+                    output_dir,
+                    args.skip_existing,
+                    args.latest,
+                    args.headed,
+                )
+                total_downloaded += d
+                total_skipped += s
+                total_failed += f
+        finally:
+            await context.close()
         print(f"\n{'='*60}")
         print("📊 Summary")
         print(f"{'='*60}")
@@ -457,6 +476,7 @@ def main():
     parser.add_argument("--output-dir", default="transcriptions", help="Output directory")
     parser.add_argument("--no-skip-existing", action="store_false", dest="skip_existing")
     parser.add_argument("--latest", action="store_true", help="Only download the latest transcript per module")
+    parser.add_argument("--headed", action="store_true", help="Show Chromium window (solve Zoom CAPTCHA if prompted)")
 
     args = parser.parse_args()
     asyncio.run(run(args))

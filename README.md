@@ -58,6 +58,7 @@ uv run zoom-transcriptions                      # all modules
 uv run zoom-transcriptions --module INF2004     # specific module
 uv run zoom-transcriptions --latest             # latest transcript only
 uv run zoom-transcriptions --no-skip-existing   # re-download all
+uv run zoom-transcriptions --headed             # show Chromium (e.g. to solve a CAPTCHA)
 ```
 
 ## How it works
@@ -70,7 +71,7 @@ uv run zoom-transcriptions --no-skip-existing   # re-download all
    - Clicks the recording link to open details
    - Clicks the video play button
    - Intercepts the Zoom API responses to get the play URL and password
-   - Downloads the transcript using the existing `fetch_zoom_recording` function
+   - Downloads the transcript inside the persistent Chromium session
 6. Saves announcements and transcripts as Markdown files in the configured output directory
 
 ## Output
