@@ -2,12 +2,14 @@
 
 import argparse
 import asyncio
+import html
 import json
 import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from playwright.async_api import Error as PlaywrightError
@@ -53,6 +55,71 @@ async def login_to_d2l(page, email: str, password: str, base_url: str):
         lambda url: "/d2l/login" not in str(url), timeout=WAIT_TIMEOUT
     )
     print("✅ D2L login successful")
+
+
+def get_org_unit_id(module_url: str) -> str:
+    """Extract the Brightspace course org unit ID from a module URL."""
+    values = parse_qs(urlparse(module_url).query).get("ou", [])
+    if not values or not values[0].isdigit():
+        raise ValueError(f"Could not find a numeric course ID in module URL: {module_url}")
+    return values[0]
+
+
+async def load_announcements(page, module_url: str) -> list[dict[str, str]]:
+    """Load announcements from the Brightspace News page and detail links."""
+    org_unit_id = get_org_unit_id(module_url)
+    parsed_url = urlparse(module_url)
+    base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    announcements_url = f"{base_url}/d2l/lms/news/main.d2l?ou={org_unit_id}"
+    await page.goto(announcements_url, wait_until="domcontentloaded")
+    links = await page.locator("a[href*='/d2l/le/news/'][href*='/view']").evaluate_all(
+        "(links) => links.map(link => ({href: link.getAttribute('href'), title: link.innerText.trim()}))"
+    )
+    announcements = []
+    for link in links:
+        await page.locator(f"a[href='{link['href']}']").click()
+        await page.wait_for_load_state("domcontentloaded")
+        announcement = await page.evaluate(
+            """() => {
+                const clean = value => value.replace(/\\s+/g, ' ').trim();
+                const body = document.querySelector('d2l-html-block')?.getAttribute('html') || '';
+                const heading = document.querySelector('h1.d2l-page-title');
+                const metadata = document.querySelector('.d2l-textblock');
+                return {
+                    title: clean(heading?.innerText || ''),
+                    date: clean(metadata?.innerText || ''),
+                    body
+                };
+            }"""
+        )
+        announcement["body"] = re.sub(
+            r"\s+",
+            " ",
+            re.sub(r"<[^>]+>", " ", html.unescape(announcement["body"])),
+        ).strip()
+        announcement["date"] = re.sub(
+            r"Your session expires after .*?stay logged in\.\s*",
+            "",
+            announcement["date"],
+        ).strip()
+        if announcement["title"] or announcement["body"]:
+            announcements.append(announcement)
+        await page.goto(announcements_url, wait_until="domcontentloaded")
+    return announcements
+
+
+def announcements_to_markdown(announcements: list[dict[str, str]]) -> str:
+    """Render announcements as a readable Markdown document."""
+    lines = ["# Announcements", ""]
+    for announcement in announcements:
+        title = announcement["title"] or "Untitled announcement"
+        lines.append(f"## {title}")
+        if announcement["date"]:
+            lines.extend(["", f"*{announcement['date']}*"])
+        if announcement["body"]:
+            lines.extend(["", announcement["body"]])
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def find_zoom_frame(page):
@@ -236,6 +303,19 @@ async def process_module(page, module_code, module_url, output_dir, skip_existin
     downloaded = 0
     skipped = 0
     failed = 0
+
+    announcements_path = module_dir / "announcements.md"
+    try:
+        announcements = await load_announcements(page, module_url)
+        if announcements:
+            announcements_path.write_text(
+                announcements_to_markdown(announcements), encoding="utf-8"
+            )
+            print(f"  📢 Saved {len(announcements)} announcement(s) to {announcements_path}")
+        else:
+            print("  📢 No announcements found")
+    except (ValueError, PlaywrightError) as e:
+        print(f"  ⚠️  Could not load announcements: {e}")
 
     recordings = await load_recordings(page, module_url)
     if not recordings:
